@@ -1,51 +1,99 @@
-"""Simple script to extract project titles and URLs from README.md and write CSV/JSON.
+"""Extract project titles and URLs from the top-level README.md and write CSV/JSON.
 
-Usage: python scripts/extract_links.py
+Usage:
+  python scripts/extract_links.py [--outdir scripts] [--preview N]
 
-Creates: scripts/projects.csv and scripts/projects.json
+The script writes <outdir>/projects.csv and <outdir>/projects.json by default.
 """
-import re
-import json
+from __future__ import annotations
+
+import argparse
 import csv
+import json
+import logging
+import re
 from pathlib import Path
+from typing import List, Dict
 
-ROOT = Path(__file__).resolve().parents[1]
-README = ROOT / "README.md"
-OUT_DIR = ROOT / "scripts"
-OUT_DIR.mkdir(parents=True, exist_ok=True)
 
-TABLE_ROW_RE = re.compile(r"^\|\s*(\d+)\s*\|\s*(.*?)\s*\|\s*\[(?:[^\]]*)\]\((https?://[^)]+)\)")
-LINK_RE = re.compile(r"\[👆\]\((https?://[^)]+)\)")
+TABLE_ROW_RE = re.compile(
+    r"^\|\s*(?P<id>\d+)\s*\|\s*(?P<name>.*?)\s*\|\s*\[(?:[^\]]*)\]\((?P<url>https?://[^)]+)\)")
+INLINE_LINK_RE = re.compile(r"\[(?:👆|[^\]]+)\]\((?P<url>https?://[^)]+)\)")
 
-rows = []
-with README.open(encoding="utf-8") as f:
-    for line in f:
+
+def parse_readme(readme_path: Path) -> List[Dict]:
+    """Parse the README and return list of {id,name,url} dicts.
+
+    This first tries to parse table rows like the current README. If none are
+    found, it falls back to finding any Markdown links.
+    """
+    rows: List[Dict] = []
+    text = readme_path.read_text(encoding="utf-8")
+
+    for line in text.splitlines():
         m = TABLE_ROW_RE.match(line)
         if m:
-            idx = m.group(1)
-            name = m.group(2).strip()
-            url = m.group(3).strip()
-            rows.append({"id": int(idx), "name": name, "url": url})
+            rows.append({"id": int(m.group("id")), "name": m.group("name").strip(), "url": m.group("url").strip()})
 
-# Fallback: find any explicit [👆](url) occurrences in file
-if not rows:
-    with README.open(encoding="utf-8") as f:
-        text = f.read()
-    found = LINK_RE.findall(text)
+    if rows:
+        logging.debug("Parsed %d table rows from README", len(rows))
+        return rows
+
+    # fallback: collect inline links
+    found = [m.group("url") for m in INLINE_LINK_RE.finditer(text)]
+    logging.debug("Found %d inline links as fallback", len(found))
     for i, u in enumerate(found, start=1):
         rows.append({"id": i, "name": f"link_{i}", "url": u})
+    return rows
 
-# write CSV
-csv_path = OUT_DIR / "projects.csv"
-with csv_path.open("w", encoding="utf-8", newline="") as f:
-    writer = csv.DictWriter(f, fieldnames=["id", "name", "url"])
-    writer.writeheader()
-    for r in rows:
-        writer.writerow(r)
 
-# write JSON
-json_path = OUT_DIR / "projects.json"
-with json_path.open("w", encoding="utf-8") as f:
-    json.dump(rows, f, indent=2, ensure_ascii=False)
+def write_outputs(rows: List[Dict], outdir: Path) -> None:
+    outdir.mkdir(parents=True, exist_ok=True)
+    csv_path = outdir / "projects.csv"
+    json_path = outdir / "projects.json"
 
-print(f"Wrote {len(rows)} links to {csv_path} and {json_path}")
+    with csv_path.open("w", encoding="utf-8", newline="") as f:
+        writer = csv.DictWriter(f, fieldnames=["id", "name", "url"])
+        writer.writeheader()
+        for r in rows:
+            writer.writerow(r)
+
+    with json_path.open("w", encoding="utf-8") as f:
+        json.dump(rows, f, indent=2, ensure_ascii=False)
+
+    logging.info("Wrote %d links to %s and %s", len(rows), csv_path, json_path)
+
+
+def main(argv: List[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(description="Extract links from README.md")
+    parser.add_argument("--readme", type=Path, default=Path(__file__).resolve().parents[1] / "README.md", help="Path to README.md")
+    parser.add_argument("--outdir", type=Path, default=Path(__file__).resolve().parents[0], help="Output directory")
+    parser.add_argument("--preview", type=int, nargs="?", const=10, help="Print a preview of the first N entries and exit (no files written)")
+    parser.add_argument("--verbose", action="store_true", help="Enable debug logging")
+    args = parser.parse_args(argv)
+
+    logging.basicConfig(level=logging.DEBUG if args.verbose else logging.INFO, format="%(levelname)s: %(message)s")
+
+    if not args.readme.exists():
+        logging.error("README not found at %s", args.readme)
+        return 2
+
+    rows = parse_readme(args.readme)
+
+    if not rows:
+        logging.warning("No links found in %s", args.readme)
+        return 0
+
+    if args.preview is not None:
+        n = args.preview
+        for r in rows[:n]:
+            print(f"{r['id']}: {r['name']} -> {r['url']}")
+        print(f"(previewed {min(n, len(rows))} of {len(rows)} entries)")
+        return 0
+
+    write_outputs(rows, args.outdir)
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
